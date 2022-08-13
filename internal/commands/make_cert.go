@@ -1,7 +1,6 @@
 package commands
 
 import (
-	"crypto"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/tls"
@@ -12,29 +11,31 @@ import (
 	"fmt"
 	"github.com/spf13/cobra"
 	"math/big"
+	"net"
 	"os"
 	"time"
 )
 
-func makeCaCommand() *cobra.Command {
+func makeCertCommand() *cobra.Command {
 	var (
-		commonName     string
-		organization   string
-		country        string
-		maxPathLen     int
-		year           int
-		month          int
-		keyBits        int
-		keyUsage       []int
-		keyUsageExt    []int
-		certPath       string
-		keyPath        string
-		parentCertPath string
-		parentKeyPath  string
+		commonName   string
+		organization string
+		country      string
+		year         int
+		month        int
+		keyBits      int
+		keyUsage     []int
+		keyUsageExt  []int
+		domainList   []string
+		ipList       []string
+		certPath     string
+		keyPath      string
+		caCertPath   string
+		caKeyPath    string
 	)
 	runCmd := &cobra.Command{
-		Use:   "make-ca",
-		Short: "Generate a ca certificate",
+		Use:   "make-cert",
+		Short: "Generate a ssl certificate",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if (year <= 0) && (month <= 0) {
 				return errors.New("invalid date")
@@ -42,12 +43,16 @@ func makeCaCommand() *cobra.Command {
 			var (
 				extKeyUsageList []x509.ExtKeyUsage
 				keyUsageResult  x509.KeyUsage
+				ipAddrList      []net.IP
 			)
 			for _, v := range keyUsageExt {
 				extKeyUsageList = append(extKeyUsageList, x509.ExtKeyUsage(v))
 			}
 			for _, v := range keyUsage {
 				keyUsageResult |= x509.KeyUsage(v)
+			}
+			for _, v := range ipList {
+				ipAddrList = append(ipAddrList, net.ParseIP(v))
 			}
 			caTemplate := &x509.Certificate{
 				Version:      3,
@@ -57,62 +62,59 @@ func makeCaCommand() *cobra.Command {
 					Organization: []string{organization},
 					Country:      []string{country},
 				},
-				NotBefore:             time.Now(),
-				NotAfter:              time.Now().AddDate(year, month, 0),
-				BasicConstraintsValid: true,
-				IsCA:                  true,
-				MaxPathLen:            maxPathLen,
-				MaxPathLenZero:        maxPathLen == 0,
-				KeyUsage:              keyUsageResult,
-				ExtKeyUsage:           extKeyUsageList,
+				NotBefore:   time.Now(),
+				NotAfter:    time.Now().AddDate(year, month, 0),
+				KeyUsage:    keyUsageResult,
+				ExtKeyUsage: extKeyUsageList,
+				DNSNames:    domainList,
+				IPAddresses: ipAddrList,
 			}
-			return buildCa(caTemplate, keyBits, certPath, keyPath, parentCertPath, parentKeyPath)
+			return buildCert(caTemplate, keyBits, certPath, keyPath, caCertPath, caKeyPath)
 		},
 	}
 	//CN = GlobalSign Root CA
 	//O = GlobalSign nv-sa
 	//C = BE
-	runCmd.Flags().StringVarP(&commonName, "name", "N", "liuguang root CA", "common name")
+	runCmd.Flags().StringVarP(&commonName, "name", "N", "liuguang ssl cert", "common name")
 	runCmd.Flags().StringVarP(&organization, "organization", "O", "liuguang cert tool", "organization name")
 	runCmd.Flags().StringVarP(&country, "country", "C", "CN", "country name")
-	runCmd.Flags().IntVar(&maxPathLen, "max-path", -1, "certificate pathLenConstraint")
-	runCmd.Flags().IntVarP(&year, "year", "Y", 5, "The validity time of the certificate, calculated by year")
+	runCmd.Flags().IntVarP(&year, "year", "Y", 2, "The validity time of the certificate, calculated by year")
 	runCmd.Flags().IntVarP(&month, "month", "M", 0, "The validity time of the certificate, calculated by month")
 	runCmd.Flags().IntVar(&keyBits, "key-bits", 2048, "key bits")
 	runCmd.Flags().IntSliceVar(&keyUsage, "key-usage", []int{
-		int(x509.KeyUsageCertSign),
-		int(x509.KeyUsageCRLSign),
+		int(x509.KeyUsageDigitalSignature),
+		int(x509.KeyUsageKeyEncipherment),
 	}, "key usage")
-	runCmd.Flags().IntSliceVar(&keyUsageExt, "key-usage-ext", []int{}, "extra key usage")
-	runCmd.Flags().StringVar(&certPath, "cert-path", "ca.cer", "certificate file output path")
-	runCmd.Flags().StringVar(&keyPath, "key-path", "ca_key.pem", "certificate key file output path")
-	runCmd.Flags().StringVar(&parentCertPath, "parent-cert-path", "", "parent CA certificate file input path")
-	runCmd.Flags().StringVar(&parentKeyPath, "parent-key-path", "", "parent CA certificate key file input path")
+	runCmd.Flags().IntSliceVar(&keyUsageExt, "key-usage-ext", []int{
+		int(x509.ExtKeyUsageServerAuth),
+		int(x509.ExtKeyUsageClientAuth),
+	}, "extra key usage")
+	runCmd.Flags().StringSliceVar(&domainList, "domain", []string{}, "domainList list")
+	runCmd.Flags().StringSliceVar(&ipList, "ip", []string{}, "IP list")
+	runCmd.Flags().StringVar(&certPath, "cert-path", "ssl.cer", "certificate file output path")
+	runCmd.Flags().StringVar(&keyPath, "key-path", "ssl_key.pem", "certificate key file output path")
+	runCmd.Flags().StringVar(&caCertPath, "ca-cert-path", "", "CA certificate file input path")
+	runCmd.Flags().StringVar(&caKeyPath, "ca-key-path", "", "CA certificate key file input path")
+	runCmd.MarkFlagRequired("ca-cert-path")
+	runCmd.MarkFlagRequired("ca-key-path")
 	return runCmd
 }
 
-func buildCa(caTemplate *x509.Certificate, keyBits int, certPath, keyPath, parentCertPath, parentKeyPath string) error {
+func buildCert(caTemplate *x509.Certificate, keyBits int, certPath, keyPath, parentCertPath, parentKeyPath string) error {
 	caPrivateKey, err := rsa.GenerateKey(rand.Reader, keyBits)
 	if err != nil {
 		return err
 	}
-	//默认为自签名
-	var (
-		parentCert                   = caTemplate
-		parentKey  crypto.PrivateKey = caPrivateKey
-	)
 	//加载上级证书
-	if (parentCertPath != "") && (parentKeyPath != "") {
-		parentCertInfo, err := tls.LoadX509KeyPair(parentCertPath, parentKeyPath)
-		if err != nil {
-			return err
-		}
-		parentCert, err = x509.ParseCertificate(parentCertInfo.Certificate[0])
-		if err != nil {
-			return err
-		}
-		parentKey = parentCertInfo.PrivateKey
+	parentCertInfo, err := tls.LoadX509KeyPair(parentCertPath, parentKeyPath)
+	if err != nil {
+		return err
 	}
+	parentCert, err := x509.ParseCertificate(parentCertInfo.Certificate[0])
+	if err != nil {
+		return err
+	}
+	parentKey := parentCertInfo.PrivateKey
 	caDer, err := x509.CreateCertificate(rand.Reader, caTemplate, parentCert, caPrivateKey.Public(), parentKey)
 	if err != nil {
 		return err

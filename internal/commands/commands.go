@@ -12,5 +12,6 @@ func Execute() error {
 	}
 	rootCmd.CompletionOptions.DisableDefaultCmd = true
 	rootCmd.AddCommand(makeCaCommand())
+	rootCmd.AddCommand(makeCertCommand())
 	return rootCmd.Execute()
 }
